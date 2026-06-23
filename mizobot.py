@@ -5,7 +5,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TG_TOKEN = "8887593469:AAFKDCeleWxHuBC4p6q-vJQMTJ5V1ff0Lts"
 TG_CHAT  = "5230956729"
-SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","ADAUSDT","BNBUSDT","XRPUSDT","LTCUSDT","DOGEUSDT","DOTUSDT","AVAXUSDT","LINKUSDT","UNIUSDT","ATOMUSDT","TRXUSDT","NEARUSDT"]
+
+# ========== أفضل 9 عملات (من باك تست 6 أشهر) ==========
+SYMBOLS = [
+    "TRXUSDT", "LTCUSDT", "ADAUSDT", "DOGEUSDT", "UNIUSDT",
+    "BNBUSDT", "XRPUSDT", "LINKUSDT", "DOTUSDT"
+]
 
 CAPITAL    = 10000.0
 RISK_PCT   = 1.0
@@ -19,11 +24,6 @@ SLIPPAGE   = 0.0003
 COMMISSION = 0.0004
 
 usdt=CAPITAL; positions=[]; TOTAL_TRADES=0; TOTAL_WINS=0; TOTAL_LOSSES=0; TOTAL_PNL=0.0
-
-# ========== فلترة العملات الخاسرة ==========
-BLACKLIST = {}          # {sym: عدد الخسائر المتتالية}
-MAX_CONSECUTIVE_LOSSES = 3
-BLACKLIST_DURATION = 48  # ساعة ثم نعيدها للتجربة
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -40,11 +40,9 @@ def tg(msg):
         except: time.sleep(3)
 
 COINGECKO_IDS = {
-    "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
-    "ADAUSDT":"cardano","BNBUSDT":"binancecoin","XRPUSDT":"ripple",
-    "LTCUSDT":"litecoin","DOGEUSDT":"dogecoin","DOTUSDT":"polkadot",
-    "AVAXUSDT":"avalanche-2","LINKUSDT":"chainlink","UNIUSDT":"uniswap",
-    "ATOMUSDT":"cosmos","TRXUSDT":"tron","NEARUSDT":"near"
+    "TRXUSDT":"tron","LTCUSDT":"litecoin","ADAUSDT":"cardano",
+    "DOGEUSDT":"dogecoin","UNIUSDT":"uniswap","BNBUSDT":"binancecoin",
+    "XRPUSDT":"ripple","LINKUSDT":"chainlink","DOTUSDT":"polkadot"
 }
 
 def get_price(sym):
@@ -122,16 +120,6 @@ def adx_calc(hi,lo,cl,p=14):
     return 100*abs(pdi-mdi)/d if d>0 else 0.0
 
 def analyze(sym):
-    # العملات المحظورة
-    if sym in BLACKLIST:
-        if BLACKLIST[sym].get("time"):
-            if (datetime.now(timezone.utc) - BLACKLIST[sym]["time"]).seconds < BLACKLIST_DURATION * 3600:
-                return None
-            else:
-                del BLACKLIST[sym]   # انتهت مدة الحظر
-        else:
-            return None
-
     h4=get_klines(sym,"4h",200)
     d1=get_klines(sym,"1d",101)
     if len(h4)<100 or len(d1)<52: return None
@@ -200,8 +188,6 @@ def send_report(cycle):
         f"🎯 نسبة الربح: {wr:.1f}%",
         f"📂 مفتوحة: {len(positions)}/{MAX_OPEN}"
     ]
-    if BLACKLIST:
-        lines.append("🚫 محظورة: " + ", ".join(BLACKLIST.keys()))
     if positions:
         lines+=["━━━━━━━━━━━━━━━━━","📌 <b>الصفقات المفتوحة:</b>"]
         for p in positions:
@@ -220,13 +206,13 @@ def send_report(cycle):
     tg("\n".join(lines))
 
 tg(
-    f"🤖 <b>بوت V18+ADX - فلترة ذكية</b>\n"
+    f"🤖 <b>بوت V18+ADX - أفضل 9 عملات</b>\n"
     f"━━━━━━━━━━━━━━━━━\n"
     f"💰 رأس المال: {CAPITAL:.2f}$\n"
     f"⚙️ RSI 30-70 | VOL 1.2x | ADX≥22\n"
-    f"🛡️ حظر بعد {MAX_CONSECUTIVE_LOSSES} خسائر متتالية\n"
     f"📊 {len(SYMBOLS)} عملة | فريم 4H + يومي\n"
-    f"🔄 يفحص كل 15 دقيقة"
+    f"🔄 يفحص كل 15 دقيقة\n"
+    f"✅ TRX LTC ADA DOGE UNI BNB XRP LINK DOT"
 )
 
 cycle=0
@@ -248,19 +234,8 @@ while True:
                 fee=(pos["entry"]+hit)*pos["qty"]*COMMISSION
                 net=pnl-fee
                 usdt+=pos["amount"]+net; TOTAL_PNL+=net; TOTAL_TRADES+=1
-                if net>0:
-                    TOTAL_WINS+=1
-                    # إعادة تعيين عداد الخسائر المتتالية للعملة
-                    if pos["sym"] in BLACKLIST:
-                        del BLACKLIST[pos["sym"]]
-                else:
-                    TOTAL_LOSSES+=1
-                    # زيادة عداد الخسائر المتتالية
-                    BLACKLIST[pos["sym"]] = BLACKLIST.get(pos["sym"], {"count": 0, "time": datetime.now(timezone.utc)})
-                    BLACKLIST[pos["sym"]]["count"] = BLACKLIST[pos["sym"]].get("count", 0) + 1
-                    if BLACKLIST[pos["sym"]]["count"] >= MAX_CONSECUTIVE_LOSSES:
-                        BLACKLIST[pos["sym"]]["time"] = datetime.now(timezone.utc)
-                        tg(f"🚫 <b>حظر {pos['sym']}</b> - {MAX_CONSECUTIVE_LOSSES} خسائر متتالية")
+                if net>0: TOTAL_WINS+=1
+                else: TOTAL_LOSSES+=1
                 positions.remove(pos)
                 icon="✅" if net>0 else "❌"
                 tg(
