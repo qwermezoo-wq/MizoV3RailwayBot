@@ -41,31 +41,27 @@ def get_price(sym):
                 timeout=15, headers={"User-Agent":"Mozilla/5.0"}
             )
             if r.status_code == 200:
-                p = r.json()[cg_id]["usd"]
-                if p > 0: return float(p)
+                data = r.json()
+                if cg_id in data:
+                    return float(data[cg_id]["usd"])
         except: pass
-        time.sleep(3)
+        time.sleep(5)
     return 0.0
 
 def get_klines(sym, interval, limit=200):
-    for _ in range(3):
-        try:
-            r = requests.get(
-                f"https://api.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",
-                timeout=15, headers={"User-Agent":"Mozilla/5.0"}
-            )
-            if r.status_code == 200:
-                return [{"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()]
-        except: pass
-        try:
-            r = requests.get(
-                f"https://api1.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",
-                timeout=15, headers={"User-Agent":"Mozilla/5.0"}
-            )
-            if r.status_code == 200:
-                return [{"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()]
-        except: pass
-        time.sleep(3)
+    urls = [
+        f"https://api.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",
+        f"https://api1.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",
+        f"https://api2.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",
+    ]
+    for url in urls:
+        for _ in range(2):
+            try:
+                r = requests.get(url, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
+                if r.status_code == 200:
+                    return [{"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()]
+            except: pass
+            time.sleep(3)
     return []
 
 def ema(s,p):
