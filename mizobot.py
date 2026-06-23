@@ -3,7 +3,6 @@ import os, time, requests, threading, traceback
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ========== الإعدادات ==========
 TG_TOKEN = "8887593469:AAFKDCeleWxHuBC4p6q-vJQMTJ5V1ff0Lts"
 TG_CHAT  = "5230956729"
 
@@ -24,14 +23,10 @@ LOOKBACK   = 20
 SLIPPAGE   = 0.0003
 COMMISSION = 0.0004
 
-usdt = CAPITAL
-positions = []
-TOTAL_TRADES = 0
-TOTAL_WINS = 0
-TOTAL_LOSSES = 0
-TOTAL_PNL = 0.0
+usdt = CAPITAL; positions = []
+TOTAL_TRADES = 0; TOTAL_WINS = 0; TOTAL_LOSSES = 0; TOTAL_PNL = 0.0
 
-# ========== خادم HTTP ==========
+# خادم HTTP لإبقاء Railway حياً
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"V42 LIVE")
@@ -46,15 +41,31 @@ def tg(msg):
             return
         except: time.sleep(3)
 
-# ========== جلب السعر الحي ==========
+# جلب السعر الحي (مصدرين)
+COINGECKO_IDS = {
+    "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
+    "BNBUSDT":"binancecoin","XRPUSDT":"ripple","ADAUSDT":"cardano",
+    "DOGEUSDT":"dogecoin","DOTUSDT":"polkadot","LTCUSDT":"litecoin",
+    "LINKUSDT":"chainlink","AVAXUSDT":"avalanche-2","UNIUSDT":"uniswap"
+}
+
 def get_price(sym):
+    # Binance أولاً
     try:
-        r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=10)
+        r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=5)
         if r.status_code == 200: return float(r.json()["price"])
     except: pass
+    # CoinGecko ثانياً
+    cg = COINGECKO_IDS.get(sym)
+    if cg:
+        try:
+            r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg}&vs_currencies=usd",
+                             timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+            if r.status_code == 200 and cg in r.json():
+                return float(r.json()[cg]["usd"])
+        except: pass
     return 0.0
 
-# ========== مؤشرات ==========
 def calc_atr(highs, lows, closes, period=14):
     if len(closes) < period+1: return 0.0
     trs = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(closes))]
@@ -81,9 +92,8 @@ def get_klines(sym, interval, limit=200):
     except: pass
     return []
 
-def analyze(sym):
-    klines = get_klines(sym, "4h", 150)
-    if len(klines) < 120: return None
+def analyze(sym, klines):
+    """تحليل إشارة بناءً على شمعة 4h مغلقة جديدة"""
     closes = [c['close'] for c in klines]; highs = [c['high'] for c in klines]
     lows = [c['low'] for c in klines]; volumes = [c['volume'] for c in klines]
     recent = klines[-LOOKBACK-1:-1]; highest = max(c['high'] for c in recent); lowest = min(c['low'] for c in recent)
@@ -101,13 +111,13 @@ def analyze(sym):
     entry = entry_price * (1 + SLIPPAGE) if direction == 'Long' else entry_price * (1 - SLIPPAGE)
     stop = entry - risk if direction == 'Long' else entry + risk
     target = entry + atr * TGT_MULT if direction == 'Long' else entry - atr * TGT_MULT
-    return {"dir": direction, "entry": entry, "stop": stop, "target": target, "atr": atr, "adx": adx}
+    return {"dir": direction, "entry": entry, "stop": stop, "target": target}
 
-def send_report(cycle, forced=False):
+def send_report(cycle):
     wr = (TOTAL_WINS/TOTAL_TRADES*100) if TOTAL_TRADES > 0 else 0.0
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        f"📊 <b>{'تقرير تجريبي' if forced else 'تقرير'} V42 #{cycle}</b> | {now}",
+        f"📊 <b>تقرير V42 #{cycle}</b> | {now}",
         f"━━━━━━━━━━━━━━━━━",
         f"💰 الرصيد: <b>{usdt:.2f}$</b>",
         f"📈 الأرباح: <b>{TOTAL_PNL:+.2f}$</b>",
@@ -127,7 +137,7 @@ def send_report(cycle, forced=False):
                 lines.append(f"{icon} {p['dir']} {p['sym']} | دخول:{p['entry']:.4f} → الآن:{cur:.4f} | {net_unr:+.2f}$")
     tg("\n".join(lines))
 
-# ========== 3 صفقات تجريبية سريعة (Scalping) ==========
+# 3 صفقات تجريبية عند البداية
 def open_demo_trades():
     global usdt
     tg("🚀 <b>جاري فتح 3 صفقات تجريبية (Scalping) بأسعار السوق الحقيقية...</b>")
@@ -138,7 +148,7 @@ def open_demo_trades():
         if price <= 0:
             tg(f"❌ فشل جلب سعر {sym}")
             continue
-        atr_val = price * 0.005  # 0.5% تقريباً
+        atr_val = price * 0.005
         stop = round(price - atr_val * STOP_MULT, 4) if dir_ == "Long" else round(price + atr_val * STOP_MULT, 4)
         target = round(price + atr_val * TGT_MULT, 4) if dir_ == "Long" else round(price - atr_val * TGT_MULT, 4)
         amount = round(usdt * RISK_PCT / 100, 2)
@@ -154,40 +164,77 @@ def open_demo_trades():
         usdt -= amount
         tg(f"🧪 <b>صفقة تجريبية #{i+1}</b>\n"
            f"{'🟢 Long' if dir_=='Long' else '🔴 Short'} <b>{sym}</b>\n"
-           f"━━━━━━━━━━━━━━━━━\n"
            f"📍 سعر: <b>{price:.4f} $</b>\n"
            f"🛑 وقف: <b>{stop:.4f} $</b>\n"
            f"🎯 هدف: <b>{target:.4f} $</b>\n"
-           f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}\n"
-           f"⏰ {datetime.now(timezone.utc).strftime('%H:%M')} UTC")
-        send_report(i+1, forced=True)
+           f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}")
 
-tg(f"🤖 <b>بوت V42 – محاكاة حية كاملة</b>\n"
+tg(f"🤖 <b>بوت V42 – محاكاة حية مباشرة</b>\n"
    f"━━━━━━━━━━━━━━━━━\n"
    f"💰 رأس المال: {CAPITAL:.2f}$\n"
    f"📊 {len(SYMBOLS)} عملة | فريم 4H\n"
-   f"🧪 سيفتح 3 صفقات تجريبية الآن\n"
-   f"📡 ثم يستمر في البحث عن الفرص الحقيقية\n"
+   f"🧪 3 صفقات تجريبية الآن\n"
+   f"📡 يفحص إغلاقات 4h كل دقيقة\n"
+   f"✅ يفتح الصفقات فور تحقق الشروط\n"
    f"🔄 تقارير كل 15 دقيقة")
 
 open_demo_trades()
+
+# قاموس لتخزين آخر وقت إغلاق تمت معالجته لكل عملة
+last_close_time = {}
 cycle = 3
 
 while True:
     try:
         cycle += 1
 
-        # إدارة الصفقات المفتوحة (تجريبية وحقيقية)
+        # 1. فحص كل عملة: هل أغلقت شمعة 4h جديدة؟
+        for sym in SYMBOLS:
+            try:
+                # نجلب آخر شمعتين 4h
+                r = requests.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=4h&limit=2", timeout=10)
+                if r.status_code != 200: continue
+                data = r.json()
+                if len(data) < 2: continue
+                close_time = data[-2][6]  # وقت إغلاق الشمعة الماضية
+                # هل هذه الشمعة جديدة؟
+                if sym not in last_close_time or close_time != last_close_time[sym]:
+                    last_close_time[sym] = close_time
+                    # نجلب 120 شمعة للتحليل
+                    klines = get_klines(sym, "4h", 120)
+                    sig = analyze(sym, klines)
+                    if sig and len(positions) < MAX_OPEN and sym not in [p['sym'] for p in positions]:
+                        entry = sig['entry']; dist = abs(entry - sig['stop'])
+                        if dist > 0:
+                            amount = round(usdt * RISK_PCT / 100, 2)
+                            qty = round(amount / dist, 6)
+                            if qty * entry >= 5:
+                                positions.append({
+                                    "sym": sym, "dir": sig['dir'], "entry": entry,
+                                    "stop": sig['stop'], "target": sig['target'],
+                                    "qty": qty, "amount": amount, "demo": False,
+                                    "time": datetime.now(timezone.utc).strftime("%H:%M")
+                                })
+                                usdt -= amount
+                                tg(f"🔔 <b>✅ صفقة حقيقية – V41!</b>\n"
+                                   f"{'🟢 Long' if sig['dir']=='Long' else '🔴 Short'} <b>{sym}</b>\n"
+                                   f"📍 سعر: <b>{entry:.4f} $</b>\n"
+                                   f"🛑 وقف: <b>{sig['stop']:.4f} $</b>\n"
+                                   f"🎯 هدف: <b>{sig['target']:.4f} $</b>\n"
+                                   f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}")
+            except: pass
+
+        # 2. إدارة الصفقات المفتوحة
         for pos in list(positions):
             price = get_price(pos["sym"])
             if price <= 0: continue
-            hit = None; reason = ""
+            hit = None
             if pos["dir"] == "Long":
-                if price <= pos["stop"]: hit = pos["stop"]; reason = "وقف"
-                elif price >= pos["target"]: hit = pos["target"]; reason = "هدف"
+                if price <= pos["stop"]: hit = pos["stop"]
+                elif price >= pos["target"]: hit = pos["target"]
             else:
-                if price >= pos["stop"]: hit = pos["stop"]; reason = "وقف"
-                elif price <= pos["target"]: hit = pos["target"]; reason = "هدف"
+                if price >= pos["stop"]: hit = pos["stop"]
+                elif price <= pos["target"]: hit = pos["target"]
             if hit:
                 pnl = (hit-pos["entry"])*pos["qty"] if pos["dir"]=="Long" else (pos["entry"]-hit)*pos["qty"]
                 fee = (pos["entry"]+hit)*pos["qty"]*COMMISSION
@@ -200,33 +247,7 @@ while True:
                 tag = "🧪 تجريبي" if pos.get("demo") else "✅ حقيقي"
                 tg(f"{'✅ ربح' if net>0 else '❌ خسارة'} | {tag} | {pos['dir']} {pos['sym']} | {net:+.2f}$ | 💼 {usdt:.2f}$")
 
-        # البحث عن فرص حقيقية (استراتيجية V41)
-        if len(positions) < MAX_OPEN:
-            open_syms = [p["sym"] for p in positions]
-            for sym in SYMBOLS:
-                if len(positions) >= MAX_OPEN: break
-                if sym in open_syms: continue
-                sig = analyze(sym)
-                if not sig: continue
-                entry = sig["entry"]; dist = abs(entry - sig["stop"])
-                if dist <= 0: continue
-                amount = round(usdt * RISK_PCT / 100, 2)
-                qty = round(amount / dist, 6)
-                if qty * entry < 5: continue
-                positions.append({
-                    "sym": sym, "dir": sig["dir"], "entry": entry,
-                    "stop": sig["stop"], "target": sig["target"],
-                    "qty": qty, "amount": amount, "demo": False,
-                    "time": datetime.now(timezone.utc).strftime("%H:%M")
-                })
-                usdt -= amount
-                tg(f"🔔 <b>✅ فتح صفقة حقيقية – V41!</b>\n"
-                   f"{'🟢 Long' if sig['dir']=='Long' else '🔴 Short'} <b>{sym}</b>\n"
-                   f"📍 سعر: <b>{entry:.4f} $</b>\n"
-                   f"🛑 وقف: <b>{sig['stop']:.4f} $</b>\n"
-                   f"🎯 هدف: <b>{sig['target']:.4f} $</b>\n"
-                   f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}")
-
+        # 3. تقرير كل 15 دقيقة
         if cycle % 15 == 0:
             send_report(cycle)
 
