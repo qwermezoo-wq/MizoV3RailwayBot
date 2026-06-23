@@ -1,13 +1,13 @@
 
 import os, time, requests, threading, traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ========== إعدادات التليجرام ==========
 TG_TOKEN = "8887593469:AAFKDCeleWxHuBC4p6q-vJQMTJ5V1ff0Lts"
 TG_CHAT  = "5230956729"
 
-# ========== أفضل 19 عملة (V41 الأصلية) ==========
+# ========== أفضل 19 عملة ==========
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
     "ADAUSDT","DOGEUSDT","DOTUSDT","LTCUSDT","LINKUSDT",
@@ -15,29 +15,40 @@ SYMBOLS = [
     "ETCUSDT","NEARUSDT","APTUSDT","VETUSDT"
 ]
 
-# ========== إعدادات V41 الأصلية (الرابحة) ==========
-CAPITAL    = 100.0
-RISK_PCT   = 1.0
-STOP_MULT  = 2.0
-TGT_MULT   = 4.0
-MAX_OPEN   = 3
-VOL_MULT   = 1.5
-ADX_MIN    = 20
-LOOKBACK   = 20
-SLIPPAGE   = 0.0003
-COMMISSION = 0.0004
+# ========== إعدادات الحساب الممول ==========
+CAPITAL          = 50000.0       # رأس المال
+RISK_PCT         = 1.0           # مخاطرة لكل صفقة
+STOP_MULT        = 2.0           # مضاعف ATR للوقف
+TGT_MULT         = 4.0           # مضاعف ATR للهدف
+MAX_OPEN         = 3             # أقصى صفقات مفتوحة
+VOL_MULT         = 1.5           # فلتر الحجم
+ADX_MIN          = 20            # أدنى ADX
+LOOKBACK         = 20            # شموع القمة/القاع
+SLIPPAGE         = 0.0003        # انزلاق
+COMMISSION       = 0.0004        # عمولة
 
+MAX_DAILY_LOSS   = 2500.0        # 5% من 50,000
+MAX_TOTAL_LOSS   = 5000.0        # 10% من 50,000
+MIN_EQUITY       = CAPITAL - MAX_TOTAL_LOSS  # 45,000
+
+# ========== الحالة الداخلية ==========
 usdt = CAPITAL
 positions = []
 TOTAL_TRADES = 0
 TOTAL_WINS = 0
 TOTAL_LOSSES = 0
 TOTAL_PNL = 0.0
+daily_start_eq = CAPITAL
+last_date = None
+stopped_out = False
+stop_reason = ""
 
 # ========== خادم HTTP (لـ Railway) ==========
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"V41 LIVE")
+        self.send_response(200); self.end_headers()
+        status = "STOPPED" if stopped_out else "LIVE"
+        self.wfile.write(f"V41 {status}".encode())
     def log_message(self, *a): pass
 threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8000))), H).serve_forever(), daemon=True).start()
 
@@ -49,6 +60,31 @@ def tg(msg):
                 data={"chat_id": TG_CHAT, "text": msg, "parse_mode": "HTML"}, timeout=15)
             return
         except: time.sleep(3)
+
+# ========== حماية رأس المال (حساب ممول) ==========
+def check_risk_limits():
+    global daily_start_eq, last_date, stopped_out, stop_reason
+    today = datetime.now(timezone.utc).date()
+    if last_date != today:
+        daily_start_eq = usdt
+        last_date = today
+
+    daily_pnl = usdt - daily_start_eq
+    total_pnl = usdt - CAPITAL
+
+    if daily_pnl <= -MAX_DAILY_LOSS:
+        stopped_out = True
+        stop_reason = f"⛔ تجاوز حد الخسارة اليومي (5%): {daily_pnl:+.2f}$"
+        tg(stop_reason)
+        return False
+
+    if usdt <= MIN_EQUITY:
+        stopped_out = True
+        stop_reason = f"⛔ تجاوز حد الخسارة التراكمي (10%): {total_pnl:+.2f}$"
+        tg(stop_reason)
+        return False
+
+    return True
 
 # ========== جلب الأسعار الحية (مصدرين) ==========
 COINGECKO_IDS = {
@@ -126,16 +162,62 @@ def analyze(sym, klines):
     entry = entry_price * (1 + SLIPPAGE) if direction == 'Long' else entry_price * (1 - SLIPPAGE)
     stop = entry - risk if direction == 'Long' else entry + risk
     target = entry + atr * TGT_MULT if direction == 'Long' else entry - atr * TGT_MULT
-    return {"dir": direction, "entry": entry, "stop": stop, "target": target}
+    return {"dir": direction, "entry": entry, "stop": stop, "target": target, "atr": atr, "adx": adx}
 
+# ========== صفقات تجريبية عند البداية ==========
+def open_demo_trades():
+    global usdt
+    tg("🚀 <b>فتح 3 صفقات تجريبية بأسعار السوق الحقيقية...</b>")
+    demos = [("BTCUSDT", "Long"), ("ETHUSDT", "Short"), ("SOLUSDT", "Long")]
+    for i, (sym, dir_) in enumerate(demos):
+        if i > 0: time.sleep(900)  # 15 دقيقة بين كل صفقة
+        if stopped_out: break
+        price = get_price(sym)
+        if price <= 0:
+            tg(f"❌ فشل جلب سعر {sym}")
+            continue
+        atr_val = price * 0.005
+        stop = round(price - atr_val * STOP_MULT, 4) if dir_ == "Long" else round(price + atr_val * STOP_MULT, 4)
+        target = round(price + atr_val * TGT_MULT, 4) if dir_ == "Long" else round(price - atr_val * TGT_MULT, 4)
+        amount = round(usdt * RISK_PCT / 100, 2)
+        dist = abs(price - stop)
+        qty = round(amount / dist, 6) if dist > 0 else 0
+        if qty * price < 10: continue
+        positions.append({
+            "sym": sym, "dir": dir_, "entry": price,
+            "stop": stop, "target": target,
+            "qty": qty, "amount": amount, "demo": True,
+            "time": datetime.now(timezone.utc).strftime("%H:%M")
+        })
+        usdt -= amount
+        exp_profit = round(abs(target - price) * qty, 2)
+        exp_loss = round(abs(price - stop) * qty, 2)
+        tg(f"🧪 <b>صفقة تجريبية #{i+1}</b>\n"
+           f"{'🟢 Long' if dir_=='Long' else '🔴 Short'} <b>{sym}</b>\n"
+           f"━━━━━━━━━━━━━━━━━\n"
+           f"📍 سعر: <b>{price:.4f} $</b>\n"
+           f"🛑 وقف: <b>{stop:.4f} $</b>\n"
+           f"🎯 هدف: <b>{target:.4f} $</b>\n"
+           f"📈 ربح متوقع: <b>+{exp_profit:.2f}$</b>\n"
+           f"📉 خسارة متوقعة: <b>-{exp_loss:.2f}$</b>\n"
+           f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}\n"
+           f"⏰ {datetime.now(timezone.utc).strftime('%H:%M')} UTC")
+
+# ========== تقرير كل 15 دقيقة ==========
 def send_report(cycle):
+    if stopped_out:
+        tg(f"⛔ <b>الحساب متوقف</b>\nالسبب: {stop_reason}\nالرصيد: {usdt:.2f}$")
+        return
     wr = (TOTAL_WINS/TOTAL_TRADES*100) if TOTAL_TRADES > 0 else 0.0
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    daily_pnl = usdt - daily_start_eq
+    total_pnl = usdt - CAPITAL
     lines = [
         f"📊 <b>تقرير V41 #{cycle}</b> | {now}",
         f"━━━━━━━━━━━━━━━━━",
-        f"💰 الرصيد: <b>{usdt:.2f}$</b>",
-        f"📈 الأرباح: <b>{TOTAL_PNL:+.2f}$</b>",
+        f"💰 الرصيد: <b>{usdt:.2f}$</b> (رأس المال: {CAPITAL:,.0f}$)",
+        f"📈 أرباح اليوم: <b>{daily_pnl:+.2f}$</b> (الحد: {MAX_DAILY_LOSS:,.0f}$)",
+        f"📊 الأرباح الكلية: <b>{total_pnl:+.2f}$</b> (الحد: {MAX_TOTAL_LOSS:,.0f}$)",
         f"📋 الصفقات: {TOTAL_TRADES} | ✅ {TOTAL_WINS} | ❌ {TOTAL_LOSSES}",
         f"🎯 نسبة الربح: {wr:.1f}%",
         f"📂 مفتوحة: {len(positions)}/{MAX_OPEN}"
@@ -150,26 +232,47 @@ def send_report(cycle):
                 fee = p["entry"]*p["qty"]*COMMISSION
                 net_unr = unr - fee; pct = net_unr/p["amount"]*100
                 icon = "🟢" if net_unr>=0 else "🔴"
-                lines.append(f"{icon} {p['dir']} {p['sym']} | دخول:{p['entry']:.4f} → الآن:{cur:.4f} | {net_unr:+.2f}$")
+                lines.append(
+                    f"{icon} {p['dir']} {p['sym']}\n"
+                    f"   دخول: {p['entry']:.4f} | الآن: {cur:.4f}\n"
+                    f"   P&L غير محقق: {net_unr:+.2f}$ ({pct:+.1f}%)\n"
+                    f"   🛑 وقف: {p['stop']:.4f} | 🎯 هدف: {p['target']:.4f}"
+                )
     tg("\n".join(lines))
 
-tg(f"🤖 <b>بوت V41 الحي – النسخة النهائية</b>\n"
+# ========== رسالة البداية ==========
+tg(f"🤖 <b>بوت V41 – حساب ممول 50,000$</b>\n"
    f"━━━━━━━━━━━━━━━━━\n"
-   f"💰 رأس المال: {CAPITAL:.2f}$\n"
+   f"💰 رأس المال: {CAPITAL:,.0f}$\n"
+   f"🛡️ حد خسارة يومي: {MAX_DAILY_LOSS:,.0f}$ (5%)\n"
+   f"🛡️ حد خسارة تراكمي: {MAX_TOTAL_LOSS:,.0f}$ (10%)\n"
    f"📊 {len(SYMBOLS)} عملة | فريم 4H\n"
    f"⚙️ V41 Breakout Strategy\n"
    f"🔄 يفحص كل دقيقة إغلاقات 4h\n"
-   f"📡 تقارير كل 15 دقيقة")
+   f"📡 تقارير كل 15 دقيقة\n"
+   f"🧪 3 صفقات تجريبية الآن")
+
+# ========== تشغيل ==========
+open_demo_trades()
 
 last_close_time = {}
 cycle = 0
 
 while True:
     try:
+        if stopped_out:
+            time.sleep(900)
+            continue
+
         cycle += 1
 
-        # 1. فحص إغلاقات 4h الجديدة
+        # 1. فحص حدود المخاطرة أولاً
+        if not check_risk_limits():
+            continue
+
+        # 2. فحص إغلاقات 4h الجديدة كل دقيقة
         for sym in SYMBOLS:
+            if stopped_out: break
             try:
                 r = requests.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=4h&limit=2", timeout=10)
                 if r.status_code != 200: continue
@@ -185,7 +288,7 @@ while True:
                         if dist > 0:
                             amount = round(usdt * RISK_PCT / 100, 2)
                             qty = round(amount / dist, 6)
-                            if qty * entry >= 5:
+                            if qty * entry >= 10:
                                 positions.append({
                                     "sym": sym, "dir": sig['dir'], "entry": entry,
                                     "stop": sig['stop'], "target": sig['target'],
@@ -193,16 +296,23 @@ while True:
                                     "time": datetime.now(timezone.utc).strftime("%H:%M")
                                 })
                                 usdt -= amount
-                                tg(f"🔔 <b>✅ فتح صفقة – V41!</b>\n"
+                                exp_profit = round(abs(sig['target'] - entry) * qty, 2)
+                                exp_loss = round(abs(entry - sig['stop']) * qty, 2)
+                                tg(f"🔔 <b>✅ فتح صفقة حقيقية – V41!</b>\n"
                                    f"{'🟢 Long' if sig['dir']=='Long' else '🔴 Short'} <b>{sym}</b>\n"
+                                   f"━━━━━━━━━━━━━━━━━\n"
                                    f"📍 سعر: <b>{entry:.4f} $</b>\n"
                                    f"🛑 وقف: <b>{sig['stop']:.4f} $</b>\n"
                                    f"🎯 هدف: <b>{sig['target']:.4f} $</b>\n"
-                                   f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}")
+                                   f"📈 ربح متوقع: <b>+{exp_profit:.2f}$</b>\n"
+                                   f"📉 خسارة متوقعة: <b>-{exp_loss:.2f}$</b>\n"
+                                   f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}\n"
+                                   f"⏰ {datetime.now(timezone.utc).strftime('%H:%M')} UTC")
             except: pass
 
-        # 2. إدارة الصفقات المفتوحة
+        # 3. إدارة الصفقات المفتوحة
         for pos in list(positions):
+            if stopped_out: break
             price = get_price(pos["sym"])
             if price <= 0: continue
             hit = None; reason = ""
@@ -222,8 +332,10 @@ while True:
                 else: TOTAL_LOSSES += 1
                 positions.remove(pos)
                 tg(f"{'✅ ربح' if net>0 else '❌ خسارة'} | {pos['dir']} {pos['sym']} | {net:+.2f}$ | 💼 {usdt:.2f}$")
+                # فحص حدود المخاطرة بعد الإغلاق
+                check_risk_limits()
 
-        # 3. تقرير كل 15 دقيقة
+        # 4. تقرير كل 15 دقيقة
         if cycle % 15 == 0:
             send_report(cycle)
 
