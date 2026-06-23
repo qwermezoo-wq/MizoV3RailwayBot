@@ -23,25 +23,49 @@ def tg(msg):
             return
         except: time.sleep(3)
 
+COINGECKO_IDS = {
+    "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
+    "ADAUSDT":"cardano","BNBUSDT":"binancecoin","XRPUSDT":"ripple",
+    "LTCUSDT":"litecoin","DOGEUSDT":"dogecoin","DOTUSDT":"polkadot",
+    "AVAXUSDT":"avalanche-2","LINKUSDT":"chainlink","UNIUSDT":"uniswap",
+    "ATOMUSDT":"cosmos","TRXUSDT":"tron","NEARUSDT":"near"
+}
+
 def get_price(sym):
+    cg_id = COINGECKO_IDS.get(sym)
+    if not cg_id: return 0.0
     for _ in range(3):
         try:
-            r=requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}",timeout=10)
-            if r.status_code==200:
-                p=float(r.json()["price"])
-                if p>0: return p
+            r = requests.get(
+                f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd",
+                timeout=15, headers={"User-Agent":"Mozilla/5.0"}
+            )
+            if r.status_code == 200:
+                p = r.json()[cg_id]["usd"]
+                if p > 0: return float(p)
         except: pass
-        time.sleep(2)
+        time.sleep(3)
     return 0.0
 
-def get_klines(sym,interval,limit=200):
+def get_klines(sym, interval, limit=200):
     for _ in range(3):
         try:
-            r=requests.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",timeout=15)
-            if r.status_code==200:
+            r = requests.get(
+                f"https://api.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",
+                timeout=15, headers={"User-Agent":"Mozilla/5.0"}
+            )
+            if r.status_code == 200:
                 return [{"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()]
         except: pass
-        time.sleep(2)
+        try:
+            r = requests.get(
+                f"https://api1.binance.com/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}",
+                timeout=15, headers={"User-Agent":"Mozilla/5.0"}
+            )
+            if r.status_code == 200:
+                return [{"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()]
+        except: pass
+        time.sleep(3)
     return []
 
 def ema(s,p):
@@ -116,14 +140,12 @@ def open_demo_trades():
     demos=[("BTCUSDT","Long"),("ETHUSDT","Long"),("SOLUSDT","Short")]
     for sym,dir_ in demos:
         price=get_price(sym)
-        if price<=0:
-            tg(f"❌ فشل جلب سعر {sym}"); continue
+        if price<=0: tg(f"❌ فشل جلب سعر {sym}"); continue
         a_val=price*0.015
         stop=round(price-a_val*STOP_MULT,4) if dir_=="Long" else round(price+a_val*STOP_MULT,4)
         target=round(price+a_val*TGT_MULT,4) if dir_=="Long" else round(price-a_val*TGT_MULT,4)
         dist=abs(price-stop)
-        amount=round(usdt*RISK_PCT/100,2)
-        qty=round(amount/dist,6)
+        amount=round(usdt*RISK_PCT/100,2); qty=round(amount/dist,6)
         rr=round(abs(target-price)/dist,1)
         positions.append({"sym":sym,"dir":dir_,"entry":price,"stop":stop,"target":target,"qty":qty,"amount":amount,"time":datetime.now(timezone.utc).strftime("%H:%M")})
         usdt-=amount
@@ -133,10 +155,10 @@ def open_demo_trades():
             f"📍 سعر الدخول: <b>{price:.4f} $</b>\n"
             f"🛑 وقف الخسارة: <b>{stop:.4f} $</b> ({abs(price-stop)/price*100:.2f}%)\n"
             f"🎯 هدف الربح: <b>{target:.4f} $</b> ({abs(target-price)/price*100:.2f}%)\n"
-            f"⚖️ نسبة المخاطرة R:R = 1:{rr}\n"
+            f"⚖️ نسبة R:R = 1:{rr}\n"
             f"💵 مبلغ الصفقة: {amount:.2f}$\n"
             f"📦 الكمية: {qty:.6f}\n"
-            f"⏰ وقت الدخول: {datetime.now(timezone.utc).strftime('%H:%M')} UTC"
+            f"⏰ {datetime.now(timezone.utc).strftime('%H:%M')} UTC"
         )
         time.sleep(3)
 
@@ -175,7 +197,7 @@ tg(
     f"⚙️ الاستراتيجية: EMA20/50 + RSI + ADX + ATR\n"
     f"📊 العملات: {len(SYMBOLS)} عملة\n"
     f"🔄 يفحص كل 15 دقيقة\n"
-    f"📱 أسعار حقيقية من Binance"
+    f"📱 أسعار حقيقية من CoinGecko"
 )
 open_demo_trades()
 
