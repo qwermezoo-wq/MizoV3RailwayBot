@@ -1,13 +1,11 @@
 
 import os, time, requests, threading, traceback
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ========== إعدادات التليجرام ==========
 TG_TOKEN = "8887593469:AAFKDCeleWxHuBC4p6q-vJQMTJ5V1ff0Lts"
 TG_CHAT  = "5230956729"
 
-# ========== أفضل 19 عملة ==========
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
     "ADAUSDT","DOGEUSDT","DOTUSDT","LTCUSDT","LINKUSDT",
@@ -15,44 +13,32 @@ SYMBOLS = [
     "ETCUSDT","NEARUSDT","APTUSDT","VETUSDT"
 ]
 
-# ========== إعدادات الحساب الممول ==========
-CAPITAL          = 50000.0       # رأس المال
-RISK_PCT         = 1.0           # مخاطرة لكل صفقة
-STOP_MULT        = 2.0           # مضاعف ATR للوقف
-TGT_MULT         = 4.0           # مضاعف ATR للهدف
-MAX_OPEN         = 3             # أقصى صفقات مفتوحة
-VOL_MULT         = 1.5           # فلتر الحجم
-ADX_MIN          = 20            # أدنى ADX
-LOOKBACK         = 20            # شموع القمة/القاع
-SLIPPAGE         = 0.0003        # انزلاق
-COMMISSION       = 0.0004        # عمولة
+CAPITAL          = 50000.0
+RISK_PCT         = 1.0
+STOP_MULT        = 2.0
+TGT_MULT         = 4.0
+MAX_OPEN         = 3
+VOL_MULT         = 1.5
+ADX_MIN          = 20
+LOOKBACK         = 20
+SLIPPAGE         = 0.0003
+COMMISSION       = 0.0004
+MAX_DAILY_LOSS   = 2500.0
+MAX_TOTAL_LOSS   = 5000.0
+MIN_EQUITY       = CAPITAL - MAX_TOTAL_LOSS
 
-MAX_DAILY_LOSS   = 2500.0        # 5% من 50,000
-MAX_TOTAL_LOSS   = 5000.0        # 10% من 50,000
-MIN_EQUITY       = CAPITAL - MAX_TOTAL_LOSS  # 45,000
-
-# ========== الحالة الداخلية ==========
 usdt = CAPITAL
 positions = []
-TOTAL_TRADES = 0
-TOTAL_WINS = 0
-TOTAL_LOSSES = 0
-TOTAL_PNL = 0.0
-daily_start_eq = CAPITAL
-last_date = None
-stopped_out = False
-stop_reason = ""
+TOTAL_TRADES = 0; TOTAL_WINS = 0; TOTAL_LOSSES = 0; TOTAL_PNL = 0.0
+daily_start_eq = CAPITAL; last_date = None; stopped_out = False; stop_reason = ""
 
-# ========== خادم HTTP (لـ Railway) ==========
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        status = "STOPPED" if stopped_out else "LIVE"
-        self.wfile.write(f"V41 {status}".encode())
+        self.wfile.write(b"V41 FUNDED LIVE")
     def log_message(self, *a): pass
 threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8000))), H).serve_forever(), daemon=True).start()
 
-# ========== إرسال رسائل تيليجرام ==========
 def tg(msg):
     for _ in range(3):
         try:
@@ -61,32 +47,23 @@ def tg(msg):
             return
         except: time.sleep(3)
 
-# ========== حماية رأس المال (حساب ممول) ==========
 def check_risk_limits():
     global daily_start_eq, last_date, stopped_out, stop_reason
     today = datetime.now(timezone.utc).date()
     if last_date != today:
         daily_start_eq = usdt
         last_date = today
-
     daily_pnl = usdt - daily_start_eq
     total_pnl = usdt - CAPITAL
-
     if daily_pnl <= -MAX_DAILY_LOSS:
-        stopped_out = True
-        stop_reason = f"⛔ تجاوز حد الخسارة اليومي (5%): {daily_pnl:+.2f}$"
-        tg(stop_reason)
-        return False
-
+        stopped_out = True; stop_reason = f"⛔ تجاوز حد الخسارة اليومي (5%): {daily_pnl:+.2f}$"
+        tg(stop_reason); return False
     if usdt <= MIN_EQUITY:
-        stopped_out = True
-        stop_reason = f"⛔ تجاوز حد الخسارة التراكمي (10%): {total_pnl:+.2f}$"
-        tg(stop_reason)
-        return False
-
+        stopped_out = True; stop_reason = f"⛔ تجاوز حد الخسارة التراكمي (10%): {total_pnl:+.2f}$"
+        tg(stop_reason); return False
     return True
 
-# ========== جلب الأسعار الحية (مصدرين) ==========
+# ========== جلب السعر الحي – 4 مصادر احتياطية (الحل الكامل) ==========
 COINGECKO_IDS = {
     "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
     "BNBUSDT":"binancecoin","XRPUSDT":"ripple","ADAUSDT":"cardano",
@@ -97,25 +74,36 @@ COINGECKO_IDS = {
 }
 
 def get_price(sym):
-    # المصدر 1: CoinGecko
-    cg_id = COINGECKO_IDS.get(sym)
-    if cg_id:
-        for _ in range(2):
-            try:
-                r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd",
-                    timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-                if r.status_code == 200 and cg_id in r.json():
-                    return float(r.json()[cg_id]["usd"])
-            except: pass
-            time.sleep(2)
-    # المصدر 2: Binance
+    # 1. Binance
     try:
-        r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=10)
+        r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=5)
         if r.status_code == 200: return float(r.json()["price"])
+    except: pass
+    # 2. CoinGecko
+    cg = COINGECKO_IDS.get(sym)
+    if cg:
+        try:
+            r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg}&vs_currencies=usd",
+                             timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+            if r.status_code == 200 and cg in r.json(): return float(r.json()[cg]["usd"])
+        except: pass
+    # 3. Bybit
+    try:
+        r = requests.get(f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={sym}", timeout=5)
+        if r.status_code == 200 and r.json().get("retCode")==0:
+            return float(r.json()["result"]["list"][0]["lastPrice"])
+    except: pass
+    # 4. Kraken
+    try:
+        kraken_map = {"BTCUSDT":"XBTUSDT","ETHUSDT":"ETHUSDT","SOLUSDT":"SOLUSDT"}
+        ksym = kraken_map.get(sym, sym.replace("USDT","USDT"))
+        r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={ksym}", timeout=5)
+        if r.status_code == 200 and not r.json().get("error"):
+            key = list(r.json()["result"].keys())[0]
+            return float(r.json()["result"][key]["c"][0])
     except: pass
     return 0.0
 
-# ========== المؤشرات ==========
 def calc_atr(highs, lows, closes, period=14):
     if len(closes) < period+1: return 0.0
     trs = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(closes))]
@@ -128,9 +116,7 @@ def calc_adx(highs, lows, closes, period=14):
     trs = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1, len(h))]
     pdm = [max(0, h[i]-h[i-1]) if h[i]-h[i-1] > l[i-1]-l[i] else 0 for i in range(1, len(h))]
     mdm = [max(0, l[i-1]-l[i]) if l[i-1]-l[i] > h[i]-h[i-1] else 0 for i in range(1, len(h))]
-    atr_s = sum(trs[-period:])/period
-    p_s = sum(pdm[-period:])/period
-    m_s = sum(mdm[-period:])/period
+    atr_s = sum(trs[-period:])/period; p_s = sum(pdm[-period:])/period; m_s = sum(mdm[-period:])/period
     if atr_s == 0: return 0.0
     pdi, mdi = 100*p_s/atr_s, 100*m_s/atr_s
     denom = pdi + mdi
@@ -164,46 +150,6 @@ def analyze(sym, klines):
     target = entry + atr * TGT_MULT if direction == 'Long' else entry - atr * TGT_MULT
     return {"dir": direction, "entry": entry, "stop": stop, "target": target, "atr": atr, "adx": adx}
 
-# ========== صفقات تجريبية عند البداية ==========
-def open_demo_trades():
-    global usdt
-    tg("🚀 <b>فتح 3 صفقات تجريبية بأسعار السوق الحقيقية...</b>")
-    demos = [("BTCUSDT", "Long"), ("ETHUSDT", "Short"), ("SOLUSDT", "Long")]
-    for i, (sym, dir_) in enumerate(demos):
-        if i > 0: time.sleep(900)  # 15 دقيقة بين كل صفقة
-        if stopped_out: break
-        price = get_price(sym)
-        if price <= 0:
-            tg(f"❌ فشل جلب سعر {sym}")
-            continue
-        atr_val = price * 0.005
-        stop = round(price - atr_val * STOP_MULT, 4) if dir_ == "Long" else round(price + atr_val * STOP_MULT, 4)
-        target = round(price + atr_val * TGT_MULT, 4) if dir_ == "Long" else round(price - atr_val * TGT_MULT, 4)
-        amount = round(usdt * RISK_PCT / 100, 2)
-        dist = abs(price - stop)
-        qty = round(amount / dist, 6) if dist > 0 else 0
-        if qty * price < 10: continue
-        positions.append({
-            "sym": sym, "dir": dir_, "entry": price,
-            "stop": stop, "target": target,
-            "qty": qty, "amount": amount, "demo": True,
-            "time": datetime.now(timezone.utc).strftime("%H:%M")
-        })
-        usdt -= amount
-        exp_profit = round(abs(target - price) * qty, 2)
-        exp_loss = round(abs(price - stop) * qty, 2)
-        tg(f"🧪 <b>صفقة تجريبية #{i+1}</b>\n"
-           f"{'🟢 Long' if dir_=='Long' else '🔴 Short'} <b>{sym}</b>\n"
-           f"━━━━━━━━━━━━━━━━━\n"
-           f"📍 سعر: <b>{price:.4f} $</b>\n"
-           f"🛑 وقف: <b>{stop:.4f} $</b>\n"
-           f"🎯 هدف: <b>{target:.4f} $</b>\n"
-           f"📈 ربح متوقع: <b>+{exp_profit:.2f}$</b>\n"
-           f"📉 خسارة متوقعة: <b>-{exp_loss:.2f}$</b>\n"
-           f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}\n"
-           f"⏰ {datetime.now(timezone.utc).strftime('%H:%M')} UTC")
-
-# ========== تقرير كل 15 دقيقة ==========
 def send_report(cycle):
     if stopped_out:
         tg(f"⛔ <b>الحساب متوقف</b>\nالسبب: {stop_reason}\nالرصيد: {usdt:.2f}$")
@@ -232,15 +178,47 @@ def send_report(cycle):
                 fee = p["entry"]*p["qty"]*COMMISSION
                 net_unr = unr - fee; pct = net_unr/p["amount"]*100
                 icon = "🟢" if net_unr>=0 else "🔴"
-                lines.append(
-                    f"{icon} {p['dir']} {p['sym']}\n"
-                    f"   دخول: {p['entry']:.4f} | الآن: {cur:.4f}\n"
-                    f"   P&L غير محقق: {net_unr:+.2f}$ ({pct:+.1f}%)\n"
-                    f"   🛑 وقف: {p['stop']:.4f} | 🎯 هدف: {p['target']:.4f}"
-                )
+                lines.append(f"{icon} {p['dir']} {p['sym']} | دخول:{p['entry']:.4f} → الآن:{cur:.4f} | {net_unr:+.2f}$")
     tg("\n".join(lines))
 
-# ========== رسالة البداية ==========
+def open_demo_trades():
+    global usdt
+    tg("🚀 <b>فتح 3 صفقات تجريبية بأسعار السوق الحقيقية...</b>")
+    demos = [("BTCUSDT", "Long"), ("ETHUSDT", "Short"), ("SOLUSDT", "Long")]
+    for i, (sym, dir_) in enumerate(demos):
+        if i > 0: time.sleep(900)
+        if stopped_out: break
+        price = get_price(sym)
+        if price <= 0:
+            tg(f"❌ فشل جلب سعر {sym} من كل المصادر")
+            continue
+        atr_val = price * 0.005
+        stop = round(price - atr_val * STOP_MULT, 4) if dir_ == "Long" else round(price + atr_val * STOP_MULT, 4)
+        target = round(price + atr_val * TGT_MULT, 4) if dir_ == "Long" else round(price - atr_val * TGT_MULT, 4)
+        amount = round(usdt * RISK_PCT / 100, 2)
+        dist = abs(price - stop)
+        qty = round(amount / dist, 6) if dist > 0 else 0
+        if qty * price < 10: continue
+        positions.append({
+            "sym": sym, "dir": dir_, "entry": price,
+            "stop": stop, "target": target,
+            "qty": qty, "amount": amount, "demo": True,
+            "time": datetime.now(timezone.utc).strftime("%H:%M")
+        })
+        usdt -= amount
+        exp_profit = round(abs(target - price) * qty, 2)
+        exp_loss = round(abs(price - stop) * qty, 2)
+        tg(f"🧪 <b>صفقة تجريبية #{i+1}</b>\n"
+           f"{'🟢 Long' if dir_=='Long' else '🔴 Short'} <b>{sym}</b>\n"
+           f"━━━━━━━━━━━━━━━━━\n"
+           f"📍 سعر: <b>{price:.4f} $</b>\n"
+           f"🛑 وقف: <b>{stop:.4f} $</b>\n"
+           f"🎯 هدف: <b>{target:.4f} $</b>\n"
+           f"📈 ربح متوقع: <b>+{exp_profit:.2f}$</b>\n"
+           f"📉 خسارة متوقعة: <b>-{exp_loss:.2f}$</b>\n"
+           f"💵 مبلغ: {amount:.2f}$ | كمية: {qty:.6f}\n"
+           f"⏰ {datetime.now(timezone.utc).strftime('%H:%M')} UTC")
+
 tg(f"🤖 <b>بوت V41 – حساب ممول 50,000$</b>\n"
    f"━━━━━━━━━━━━━━━━━\n"
    f"💰 رأس المال: {CAPITAL:,.0f}$\n"
@@ -250,11 +228,10 @@ tg(f"🤖 <b>بوت V41 – حساب ممول 50,000$</b>\n"
    f"⚙️ V41 Breakout Strategy\n"
    f"🔄 يفحص كل دقيقة إغلاقات 4h\n"
    f"📡 تقارير كل 15 دقيقة\n"
-   f"🧪 3 صفقات تجريبية الآن")
+   f"🧪 3 صفقات تجريبية الآن\n"
+   f"📡 مصادر الأسعار: Binance + CoinGecko + Bybit + Kraken")
 
-# ========== تشغيل ==========
 open_demo_trades()
-
 last_close_time = {}
 cycle = 0
 
@@ -263,14 +240,9 @@ while True:
         if stopped_out:
             time.sleep(900)
             continue
-
         cycle += 1
+        if not check_risk_limits(): continue
 
-        # 1. فحص حدود المخاطرة أولاً
-        if not check_risk_limits():
-            continue
-
-        # 2. فحص إغلاقات 4h الجديدة كل دقيقة
         for sym in SYMBOLS:
             if stopped_out: break
             try:
@@ -310,7 +282,6 @@ while True:
                                    f"⏰ {datetime.now(timezone.utc).strftime('%H:%M')} UTC")
             except: pass
 
-        # 3. إدارة الصفقات المفتوحة
         for pos in list(positions):
             if stopped_out: break
             price = get_price(pos["sym"])
@@ -332,10 +303,8 @@ while True:
                 else: TOTAL_LOSSES += 1
                 positions.remove(pos)
                 tg(f"{'✅ ربح' if net>0 else '❌ خسارة'} | {pos['dir']} {pos['sym']} | {net:+.2f}$ | 💼 {usdt:.2f}$")
-                # فحص حدود المخاطرة بعد الإغلاق
                 check_risk_limits()
 
-        # 4. تقرير كل 15 دقيقة
         if cycle % 15 == 0:
             send_report(cycle)
 
