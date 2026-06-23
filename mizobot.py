@@ -20,6 +20,11 @@ COMMISSION = 0.0004
 
 usdt=CAPITAL; positions=[]; TOTAL_TRADES=0; TOTAL_WINS=0; TOTAL_LOSSES=0; TOTAL_PNL=0.0
 
+# ========== فلترة العملات الخاسرة ==========
+BLACKLIST = {}          # {sym: عدد الخسائر المتتالية}
+MAX_CONSECUTIVE_LOSSES = 3
+BLACKLIST_DURATION = 48  # ساعة ثم نعيدها للتجربة
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
@@ -117,11 +122,20 @@ def adx_calc(hi,lo,cl,p=14):
     return 100*abs(pdi-mdi)/d if d>0 else 0.0
 
 def analyze(sym):
+    # العملات المحظورة
+    if sym in BLACKLIST:
+        if BLACKLIST[sym].get("time"):
+            if (datetime.now(timezone.utc) - BLACKLIST[sym]["time"]).seconds < BLACKLIST_DURATION * 3600:
+                return None
+            else:
+                del BLACKLIST[sym]   # انتهت مدة الحظر
+        else:
+            return None
+
     h4=get_klines(sym,"4h",200)
     d1=get_klines(sym,"1d",101)
     if len(h4)<100 or len(d1)<52: return None
 
-    # اتجاه يومي - شموع مغلقة فقط
     d1_closed = d1[:-1]
     d1_cl=[c["close"] for c in d1_closed[-60:]]
     d1_e50=ema(d1_cl,50)
@@ -143,7 +157,6 @@ def analyze(sym):
     if e20<=0 or e50<=0 or a<=0: return None
     if (a/cl[-1]*100)<MIN_ATR_PCT: return None
 
-    # شمعة الإشارة = الشمعة المغلقة win[-2] (وليس win[-1] الحالية)
     signal = win[-2]
     if signal["volume"] < avg_vol * VOL_MULT: return None
     if rs<=30 or rs>=70: return None
@@ -187,6 +200,8 @@ def send_report(cycle):
         f"🎯 نسبة الربح: {wr:.1f}%",
         f"📂 مفتوحة: {len(positions)}/{MAX_OPEN}"
     ]
+    if BLACKLIST:
+        lines.append("🚫 محظورة: " + ", ".join(BLACKLIST.keys()))
     if positions:
         lines+=["━━━━━━━━━━━━━━━━━","📌 <b>الصفقات المفتوحة:</b>"]
         for p in positions:
@@ -205,13 +220,13 @@ def send_report(cycle):
     tg("\n".join(lines))
 
 tg(
-    f"🤖 <b>بوت V18+ADX - الإستراتيجية الأصلية</b>\n"
+    f"🤖 <b>بوت V18+ADX - فلترة ذكية</b>\n"
     f"━━━━━━━━━━━━━━━━━\n"
     f"💰 رأس المال: {CAPITAL:.2f}$\n"
     f"⚙️ RSI 30-70 | VOL 1.2x | ADX≥22\n"
+    f"🛡️ حظر بعد {MAX_CONSECUTIVE_LOSSES} خسائر متتالية\n"
     f"📊 {len(SYMBOLS)} عملة | فريم 4H + يومي\n"
-    f"🔄 يفحص كل 15 دقيقة\n"
-    f"✅ إشارات حقيقية فقط"
+    f"🔄 يفحص كل 15 دقيقة"
 )
 
 cycle=0
@@ -233,8 +248,19 @@ while True:
                 fee=(pos["entry"]+hit)*pos["qty"]*COMMISSION
                 net=pnl-fee
                 usdt+=pos["amount"]+net; TOTAL_PNL+=net; TOTAL_TRADES+=1
-                if net>0: TOTAL_WINS+=1
-                else: TOTAL_LOSSES+=1
+                if net>0:
+                    TOTAL_WINS+=1
+                    # إعادة تعيين عداد الخسائر المتتالية للعملة
+                    if pos["sym"] in BLACKLIST:
+                        del BLACKLIST[pos["sym"]]
+                else:
+                    TOTAL_LOSSES+=1
+                    # زيادة عداد الخسائر المتتالية
+                    BLACKLIST[pos["sym"]] = BLACKLIST.get(pos["sym"], {"count": 0, "time": datetime.now(timezone.utc)})
+                    BLACKLIST[pos["sym"]]["count"] = BLACKLIST[pos["sym"]].get("count", 0) + 1
+                    if BLACKLIST[pos["sym"]]["count"] >= MAX_CONSECUTIVE_LOSSES:
+                        BLACKLIST[pos["sym"]]["time"] = datetime.now(timezone.utc)
+                        tg(f"🚫 <b>حظر {pos['sym']}</b> - {MAX_CONSECUTIVE_LOSSES} خسائر متتالية")
                 positions.remove(pos)
                 icon="✅" if net>0 else "❌"
                 tg(
