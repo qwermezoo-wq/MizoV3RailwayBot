@@ -7,7 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 TG_TOKEN = "8887593469:AAFKDCeleWxHuBC4p6q-vJQMTJ5V1ff0Lts"
 TG_CHAT  = "5230956729"
 
-# ========== أفضل 12 عملة أثبتت نجاحها ==========
+# ========== أفضل 12 عملة ==========
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT","ADAUSDT","BNBUSDT",
     "XRPUSDT","DOGEUSDT","DOTUSDT","LTCUSDT","AVAXUSDT",
@@ -19,7 +19,7 @@ CAPITAL          = 50000.0
 RISK_PCT         = 1.0
 STOP_MULT        = 2.0
 TGT_MULT         = 4.0
-MAX_OPEN         = 3
+MAX_OPEN         = 4
 VOL_MULT         = 1.5
 ADX_MIN          = 20
 LOOKBACK         = 20
@@ -28,6 +28,10 @@ COMMISSION       = 0.0004
 MAX_DAILY_LOSS   = 2500.0
 MAX_TOTAL_LOSS   = 5000.0
 MIN_EQUITY       = CAPITAL - MAX_TOTAL_LOSS
+
+# فلتر الاتجاه EMA50
+EMA_TREND_PERIOD = 50
+USE_TREND_FILTER = True
 
 usdt = CAPITAL
 positions = []
@@ -43,7 +47,7 @@ stop_reason = ""
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        self.wfile.write(b"V41 LIVE")
+        self.wfile.write(b"V41+TREND LIVE")
     def log_message(self, *a): pass
 threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8000))), H).serve_forever(), daemon=True).start()
 
@@ -99,15 +103,14 @@ def get_price(sym):
         if r.status_code == 200 and r.json().get("retCode")==0:
             return float(r.json()["result"]["list"][0]["lastPrice"])
     except: pass
-    try:
-        kraken_map = {"BTCUSDT":"XBTUSDT","ETHUSDT":"ETHUSDT","SOLUSDT":"SOLUSDT"}
-        ksym = kraken_map.get(sym, sym.replace("USDT","USDT"))
-        r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={ksym}", timeout=5)
-        if r.status_code == 200 and not r.json().get("error"):
-            key = list(r.json()["result"].keys())[0]
-            return float(r.json()["result"][key]["c"][0])
-    except: pass
     return 0.0
+
+def calc_ema(series, period):
+    if len(series) < period: return 0.0
+    k = 2.0 / (period + 1)
+    val = sum(series[:period]) / period
+    for v in series[period:]: val = (v - val) * k + val
+    return val
 
 def calc_atr(highs, lows, closes, period=14):
     if len(closes) < period+1: return 0.0
@@ -149,6 +152,15 @@ def analyze(sym, klines):
     if current['high'] > highest: direction = 'Long'; entry_price = highest
     elif current['low'] < lowest: direction = 'Short'; entry_price = lowest
     if direction is None: return None
+
+    # ✅ فلتر اتجاه EMA50
+    if USE_TREND_FILTER:
+        ema50 = calc_ema(closes, EMA_TREND_PERIOD)
+        if ema50 <= 0: return None
+        trend = 'Bullish' if closes[-1] > ema50 else 'Bearish'
+        if direction == 'Long' and trend != 'Bullish': return None
+        if direction == 'Short' and trend != 'Bearish': return None
+
     risk = atr * STOP_MULT
     entry = entry_price * (1 + SLIPPAGE) if direction == 'Long' else entry_price * (1 - SLIPPAGE)
     stop = entry - risk if direction == 'Long' else entry + risk
@@ -164,14 +176,15 @@ def send_report(cycle):
     daily_pnl = usdt - daily_start_eq
     total_pnl = usdt - CAPITAL
     lines = [
-        f"📊 <b>تقرير V41 #{cycle}</b> | {now}",
+        f"📊 <b>تقرير V41+Trend #{cycle}</b> | {now}",
         f"━━━━━━━━━━━━━━━━━",
         f"💰 الرصيد: <b>{usdt:.2f}$</b> (رأس المال: {CAPITAL:,.0f}$)",
         f"📈 أرباح اليوم: <b>{daily_pnl:+.2f}$</b> (الحد: {MAX_DAILY_LOSS:,.0f}$)",
         f"📊 الأرباح الكلية: <b>{total_pnl:+.2f}$</b> (الحد: {MAX_TOTAL_LOSS:,.0f}$)",
         f"📋 الصفقات: {TOTAL_TRADES} | ✅ {TOTAL_WINS} | ❌ {TOTAL_LOSSES}",
         f"🎯 نسبة الربح: {wr:.1f}%",
-        f"📂 مفتوحة: {len(positions)}/{MAX_OPEN}"
+        f"📂 مفتوحة: {len(positions)}/{MAX_OPEN}",
+        f"🛡️ فلتر: EMA50 (Long↑/Short↓)"
     ]
     if positions:
         lines.append("━━━━━━━━━━━━━━━━━")
@@ -186,16 +199,16 @@ def send_report(cycle):
                 lines.append(f"{icon} {p['dir']} {p['sym']} | دخول:{p['entry']:.4f} → الآن:{cur:.4f} | {net_unr:+.2f}$")
     tg("\n".join(lines))
 
-tg(f"🤖 <b>بوت V41 – حساب ممول 50,000$</b>\n"
+tg(f"🤖 <b>بوت V41+Trend – حساب ممول 50,000$</b>\n"
    f"━━━━━━━━━━━━━━━━━\n"
    f"💰 رأس المال: {CAPITAL:,.0f}$\n"
    f"🛡️ حد خسارة يومي: {MAX_DAILY_LOSS:,.0f}$ (5%)\n"
    f"🛡️ حد خسارة تراكمي: {MAX_TOTAL_LOSS:,.0f}$ (10%)\n"
-   f"📊 {len(SYMBOLS)} عملة (أفضل العملات)\n"
-   f"⚙️ V41 Breakout Strategy\n"
+   f"📊 {len(SYMBOLS)} عملة | فريم 4H\n"
+   f"⚙️ V41 + فلتر EMA50\n"
+   f"🛡️ Long فقط فوق EMA50 | Short فقط تحت EMA50\n"
    f"🔄 يفحص كل دقيقة إغلاقات 4h\n"
    f"📡 تقارير كل 15 دقيقة\n"
-   f"📡 مصادر الأسعار: Binance + CoinGecko + Bybit + Kraken\n"
    f"⏳ في انتظار إشارات حقيقية...")
 
 last_close_time = {}
@@ -236,7 +249,7 @@ while True:
                                 usdt -= amount
                                 exp_profit = round(abs(sig['target'] - entry) * qty, 2)
                                 exp_loss = round(abs(entry - sig['stop']) * qty, 2)
-                                tg(f"🔔 <b>✅ فتح صفقة حقيقية – V41!</b>\n"
+                                tg(f"🔔 <b>✅ فتح صفقة – V41+Trend!</b>\n"
                                    f"{'🟢 Long' if sig['dir']=='Long' else '🔴 Short'} <b>{sym}</b>\n"
                                    f"━━━━━━━━━━━━━━━━━\n"
                                    f"📍 سعر: <b>{entry:.4f} $</b>\n"
