@@ -3,15 +3,12 @@ import os, time, requests, threading, traceback
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ========== إعدادات التليجرام ==========
 TG_TOKEN = "8887593469:AAFKDCeleWxHuBC4p6q-vJQMTJ5V1ff0Lts"
 TG_CHAT  = "5230956729"
 
-# ========== أفضل 12 عملة ==========
+# ========== أفضل 5 عملات ذهبية ==========
 SYMBOLS = [
-    "BTCUSDT","ETHUSDT","SOLUSDT","ADAUSDT","BNBUSDT",
-    "XRPUSDT","DOGEUSDT","DOTUSDT","LTCUSDT","AVAXUSDT",
-    "TRXUSDT","UNIUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "RUNEUSDT", "TRXUSDT"
 ]
 
 # ========== إعدادات الحساب الممول ==========
@@ -20,6 +17,7 @@ RISK_PCT         = 1.0
 STOP_MULT        = 2.0
 TGT_MULT         = 4.0
 MAX_OPEN         = 4
+MAX_DAILY_TRADES = 4
 VOL_MULT         = 1.5
 ADX_MIN          = 20
 LOOKBACK         = 20
@@ -28,8 +26,6 @@ COMMISSION       = 0.0004
 MAX_DAILY_LOSS   = 2500.0
 MAX_TOTAL_LOSS   = 5000.0
 MIN_EQUITY       = CAPITAL - MAX_TOTAL_LOSS
-
-# فلتر الاتجاه EMA50
 EMA_TREND_PERIOD = 50
 USE_TREND_FILTER = True
 
@@ -43,11 +39,13 @@ daily_start_eq = CAPITAL
 last_date = None
 stopped_out = False
 stop_reason = ""
+allowed_new_trades_today = MAX_DAILY_TRADES
+opened_today = 0
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        self.wfile.write(b"V41+TREND LIVE")
+        self.wfile.write(b"V41 5SYM LIVE")
     def log_message(self, *a): pass
 threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8000))), H).serve_forever(), daemon=True).start()
 
@@ -60,11 +58,16 @@ def tg(msg):
         except: time.sleep(3)
 
 def check_risk_limits():
-    global daily_start_eq, last_date, stopped_out, stop_reason
+    global daily_start_eq, last_date, stopped_out, stop_reason, allowed_new_trades_today, opened_today
     today = datetime.now(timezone.utc).date()
     if last_date != today:
+        carried_over = len(positions)
+        allowed_new_trades_today = max(0, MAX_DAILY_TRADES - carried_over)
         daily_start_eq = usdt
         last_date = today
+        opened_today = 0
+        if carried_over > 0:
+            tg(f"🌅 يوم جديد | {carried_over} صفقة مفتوحة. مسموح {allowed_new_trades_today} صفقة جديدة.")
     daily_pnl = usdt - daily_start_eq
     total_pnl = usdt - CAPITAL
     if daily_pnl <= -MAX_DAILY_LOSS:
@@ -80,10 +83,8 @@ def check_risk_limits():
     return True
 
 COINGECKO_IDS = {
-    "BTCUSDT":"bitcoin","ETHUSDT":"ethereum","SOLUSDT":"solana",
-    "ADAUSDT":"cardano","BNBUSDT":"binancecoin","XRPUSDT":"ripple",
-    "DOGEUSDT":"dogecoin","DOTUSDT":"polkadot","LTCUSDT":"litecoin",
-    "AVAXUSDT":"avalanche-2","TRXUSDT":"tron","UNIUSDT":"uniswap"
+    "BTCUSDT":"bitcoin", "ETHUSDT":"ethereum", "SOLUSDT":"solana",
+    "RUNEUSDT":"thorchain", "TRXUSDT":"tron"
 }
 
 def get_price(sym):
@@ -139,25 +140,42 @@ def get_klines(sym, interval, limit=200):
     return []
 
 def analyze(sym, klines):
-    closes = [c['close'] for c in klines]; highs = [c['high'] for c in klines]
-    lows = [c['low'] for c in klines]; volumes = [c['volume'] for c in klines]
-    recent = klines[-LOOKBACK-1:-1]; highest = max(c['high'] for c in recent); lowest = min(c['low'] for c in recent)
-    atr = calc_atr(highs, lows, closes, 14)
+    closes = [c['close'] for c in klines]
+    highs = [c['high'] for c in klines]
+    lows = [c['low'] for c in klines]
+    volumes = [c['volume'] for c in klines]
+    
+    # ✅ الشمعة المغلقة والبيانات التاريخية فقط
+    if len(klines) < LOOKBACK + 2:
+        return None
+    recent = klines[-LOOKBACK-2:-2]
+    highest = max(c['high'] for c in recent) if recent else 0
+    lowest = min(c['low'] for c in recent) if recent else 0
+    
+    atr = calc_atr(highs[:-1], lows[:-1], closes[:-1], 14)
     if atr <= 0: return None
-    adx = calc_adx(highs, lows, closes, 14)
+    adx = calc_adx(highs[:-1], lows[:-1], closes[:-1], 14)
     if adx < ADX_MIN: return None
-    avg_vol = sum(volumes[-LOOKBACK-1:-1]) / LOOKBACK
+    
+    avg_vol = sum(volumes[-LOOKBACK-2:-2]) / LOOKBACK if len(volumes) >= LOOKBACK+2 else 0
     if volumes[-2] < avg_vol * VOL_MULT: return None
-    current = klines[-1]; direction = None; entry_price = 0.0
-    if current['high'] > highest: direction = 'Long'; entry_price = highest
-    elif current['low'] < lowest: direction = 'Short'; entry_price = lowest
-    if direction is None: return None
+    
+    current = klines[-2]
+    direction = None
+    entry_price = 0.0
+    if current['high'] > highest:
+        direction = 'Long'
+        entry_price = highest
+    elif current['low'] < lowest:
+        direction = 'Short'
+        entry_price = lowest
+    if direction is None:
+        return None
 
-    # ✅ فلتر اتجاه EMA50
     if USE_TREND_FILTER:
-        ema50 = calc_ema(closes, EMA_TREND_PERIOD)
+        ema50 = calc_ema(closes[:-1], EMA_TREND_PERIOD)
         if ema50 <= 0: return None
-        trend = 'Bullish' if closes[-1] > ema50 else 'Bearish'
+        trend = 'Bullish' if closes[-2] > ema50 else 'Bearish'
         if direction == 'Long' and trend != 'Bullish': return None
         if direction == 'Short' and trend != 'Bearish': return None
 
@@ -176,7 +194,7 @@ def send_report(cycle):
     daily_pnl = usdt - daily_start_eq
     total_pnl = usdt - CAPITAL
     lines = [
-        f"📊 <b>تقرير V41+Trend #{cycle}</b> | {now}",
+        f"📊 <b>تقرير V41 #{cycle}</b> | {now}",
         f"━━━━━━━━━━━━━━━━━",
         f"💰 الرصيد: <b>{usdt:.2f}$</b> (رأس المال: {CAPITAL:,.0f}$)",
         f"📈 أرباح اليوم: <b>{daily_pnl:+.2f}$</b> (الحد: {MAX_DAILY_LOSS:,.0f}$)",
@@ -184,6 +202,7 @@ def send_report(cycle):
         f"📋 الصفقات: {TOTAL_TRADES} | ✅ {TOTAL_WINS} | ❌ {TOTAL_LOSSES}",
         f"🎯 نسبة الربح: {wr:.1f}%",
         f"📂 مفتوحة: {len(positions)}/{MAX_OPEN}",
+        f"💡 مسموح اليوم: {allowed_new_trades_today} صفقة جديدة",
         f"🛡️ فلتر: EMA50 (Long↑/Short↓)"
     ]
     if positions:
@@ -194,19 +213,20 @@ def send_report(cycle):
             if cur > 0:
                 unr = (cur-p["entry"])*p["qty"] if p["dir"]=="Long" else (p["entry"]-cur)*p["qty"]
                 fee = p["entry"]*p["qty"]*COMMISSION
-                net_unr = unr - fee; pct = net_unr/p["amount"]*100
+                net_unr = unr - fee
+                pct = net_unr/p["amount"]*100 if p["amount"] > 0 else 0
                 icon = "🟢" if net_unr>=0 else "🔴"
                 lines.append(f"{icon} {p['dir']} {p['sym']} | دخول:{p['entry']:.4f} → الآن:{cur:.4f} | {net_unr:+.2f}$")
     tg("\n".join(lines))
 
-tg(f"🤖 <b>بوت V41+Trend – حساب ممول 50,000$</b>\n"
+tg(f"🤖 <b>بوت V41+Trend – 5 عملات – حساب ممول 50,000$</b>\n"
    f"━━━━━━━━━━━━━━━━━\n"
    f"💰 رأس المال: {CAPITAL:,.0f}$\n"
    f"🛡️ حد خسارة يومي: {MAX_DAILY_LOSS:,.0f}$ (5%)\n"
    f"🛡️ حد خسارة تراكمي: {MAX_TOTAL_LOSS:,.0f}$ (10%)\n"
-   f"📊 {len(SYMBOLS)} عملة | فريم 4H\n"
+   f"📊 {len(SYMBOLS)} عملة (BTC,ETH,SOL,RUNE,TRX)\n"
    f"⚙️ V41 + فلتر EMA50\n"
-   f"🛡️ Long فقط فوق EMA50 | Short فقط تحت EMA50\n"
+   f"🧠 حد ذكي: أقصى 4 صفقات جديدة يومياً\n"
    f"🔄 يفحص كل دقيقة إغلاقات 4h\n"
    f"📡 تقارير كل 15 دقيقة\n"
    f"⏳ في انتظار إشارات حقيقية...")
@@ -234,10 +254,14 @@ while True:
                     last_close_time[sym] = close_time
                     klines = get_klines(sym, "4h", 120)
                     sig = analyze(sym, klines)
-                    if sig and len(positions) < MAX_OPEN and sym not in [p['sym'] for p in positions]:
-                        entry = sig['entry']; dist = abs(entry - sig['stop'])
+                    if sig and len(positions) < MAX_OPEN and sym not in [p['sym'] for p in positions] and opened_today < allowed_new_trades_today:
+                        entry = sig['entry']
+                        dist = abs(entry - sig['stop'])
                         if dist > 0:
-                            amount = round(usdt * RISK_PCT / 100, 2)
+                            if usdt >= CAPITAL:
+                                amount = round(CAPITAL * RISK_PCT / 100, 2)
+                            else:
+                                amount = round(usdt * RISK_PCT / 100, 2)
                             qty = round(amount / dist, 6)
                             if qty * entry >= 10:
                                 positions.append({
@@ -246,10 +270,10 @@ while True:
                                     "qty": qty, "amount": amount,
                                     "time": datetime.now(timezone.utc).strftime("%H:%M")
                                 })
-                                usdt -= amount
+                                opened_today += 1
                                 exp_profit = round(abs(sig['target'] - entry) * qty, 2)
                                 exp_loss = round(abs(entry - sig['stop']) * qty, 2)
-                                tg(f"🔔 <b>✅ فتح صفقة – V41+Trend!</b>\n"
+                                tg(f"🔔 <b>✅ فتح صفقة – V41!</b>\n"
                                    f"{'🟢 Long' if sig['dir']=='Long' else '🔴 Short'} <b>{sym}</b>\n"
                                    f"━━━━━━━━━━━━━━━━━\n"
                                    f"📍 سعر: <b>{entry:.4f} $</b>\n"
@@ -265,7 +289,8 @@ while True:
             if stopped_out: break
             price = get_price(pos["sym"])
             if price <= 0: continue
-            hit = None; reason = ""
+            hit = None
+            reason = ""
             if pos["dir"] == "Long":
                 if price <= pos["stop"]: hit = pos["stop"]; reason = "وقف"
                 elif price >= pos["target"]: hit = pos["target"]; reason = "هدف"
@@ -276,8 +301,9 @@ while True:
                 pnl = (hit-pos["entry"])*pos["qty"] if pos["dir"]=="Long" else (pos["entry"]-hit)*pos["qty"]
                 fee = (pos["entry"]+hit)*pos["qty"]*COMMISSION
                 net = pnl - fee
-                usdt += pos["amount"] + net
-                TOTAL_PNL += net; TOTAL_TRADES += 1
+                usdt += net
+                TOTAL_PNL += net
+                TOTAL_TRADES += 1
                 if net > 0: TOTAL_WINS += 1
                 else: TOTAL_LOSSES += 1
                 positions.remove(pos)
